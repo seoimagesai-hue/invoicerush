@@ -40,3 +40,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Mollie remote payment server secrets (WordPress plugin; not part of InvoiceRush app)
+Token.txt
+mollieremotepayment-server/credentials.php
+mollieremotepayment-server-v2.2.0.zip
