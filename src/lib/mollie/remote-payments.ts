@@ -11,6 +11,7 @@ import {
   resolveRemotePaymentCurrency,
   serverCurrencyHealthLabel,
 } from "@/lib/mollie/remote-currency";
+import { ensureRemotePaymentSchema } from "@/lib/mollie/ensure-remote-payment-schema";
 
 export class RemotePaymentError extends Error {
   status: number;
@@ -468,6 +469,8 @@ async function createPaymentForOrder(
 export async function handleRemoteHealth(
   form: Record<string, string>,
 ): Promise<Response> {
+  await ensureRemotePaymentSchema();
+
   const timestamp = Number.parseInt(form.request_ts ?? "0", 10);
   const signature = form.signature ?? "";
   const secret = getSharedSecret();
@@ -535,6 +538,8 @@ export async function handleRemoteHealth(
 export async function handleRemoteCreate(
   form: Record<string, string>,
 ): Promise<Response> {
+  await ensureRemotePaymentSchema();
+
   const data: ClientRequestData = {
     order_id: form.order_id ?? "",
     request_ts: form.request_ts ?? "",
@@ -654,6 +659,8 @@ export async function handleRemoteCheckout(
   remoteOrderId: string,
   accessToken: string,
 ): Promise<Response> {
+  await ensureRemotePaymentSchema();
+
   const orderRows = await db
     .select()
     .from(remoteOrders)
@@ -697,6 +704,8 @@ export async function handleRemoteReturn(
   remoteOrderId: string,
   accessToken: string,
 ): Promise<Response> {
+  await ensureRemotePaymentSchema();
+
   const orderRows = await db
     .select()
     .from(remoteOrders)
@@ -730,6 +739,8 @@ export async function handleRemoteCancel(
   remoteOrderId: string,
   accessToken: string,
 ): Promise<Response> {
+  await ensureRemotePaymentSchema();
+
   const orderRows = await db
     .select()
     .from(remoteOrders)
@@ -747,6 +758,8 @@ export async function handleRemoteCancel(
 export async function handleRemoteWebhook(
   paymentId: string,
 ): Promise<Response> {
+  await ensureRemotePaymentSchema();
+
   if (!paymentId || !paymentId.startsWith("tr_")) {
     return new Response(null, { status: 400 });
   }
