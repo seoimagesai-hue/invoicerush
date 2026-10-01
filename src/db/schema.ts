@@ -828,6 +828,42 @@ export const webhookFailures = pgTable("webhook_failures", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+/** WooCommerce remote Mollie payment orders (server-side payment hub). */
+export const remoteOrders = pgTable(
+  "remote_orders",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    clientOrderId: text("client_order_id").notNull(),
+    accessToken: text("access_token").notNull(),
+    callbackUrl: text("callback_url").notNull(),
+    returnUrl: text("return_url").notNull(),
+    cancelUrl: text("cancel_url").notNull(),
+    amount: text("amount").notNull(),
+    currency: varchar("currency", { length: 3 }).notNull(),
+    productName: text("product_name").notNull(),
+    merchantOrderNumber: text("merchant_order_number"),
+    integrationMode: text("integration_mode").default("").notNull(),
+    items: jsonb("items").notNull(),
+    molliePaymentId: text("mollie_payment_id"),
+    mollieCheckoutUrl: text("mollie_checkout_url"),
+    paymentStatus: text("payment_status").default("created").notNull(),
+    paymentMethod: text("payment_method"),
+    callbackSentAt: timestamp("callback_sent_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    index("remote_orders_mollie_payment_idx").on(t.molliePaymentId),
+    index("remote_orders_client_order_idx").on(t.clientOrderId),
+  ],
+);
+
+/** Replay protection for signed remote payment create requests. */
+export const remotePaymentNonces = pgTable("remote_payment_nonces", {
+  nonceHash: text("nonce_hash").primaryKey(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
 // Relations (selected)
 export const usersRelations = relations(users, ({ many }) => ({
   memberships: many(workspaceMembers),

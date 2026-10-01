@@ -62,7 +62,27 @@ function applySecurityHeaders(response: NextResponse, pathname: string) {
 
 export default auth((request) => {
   const { pathname } = request.nextUrl;
+  const search = request.nextUrl.searchParams;
   const isAuthenticated = Boolean(request.auth);
+
+  // WooCommerce remote Mollie payment server (WP-plugin compatible query params).
+  const isRemotePaymentRoot =
+    pathname === "/" &&
+    (search.get("wrp_mollie_health") === "1" ||
+      search.get("ro") === "1" ||
+      search.get("mrp") === "1" ||
+      search.has("rop") ||
+      search.has("ros") ||
+      search.has("rof"));
+
+  if (isRemotePaymentRoot) {
+    const rewriteUrl = request.nextUrl.clone();
+    rewriteUrl.pathname = "/api/remote-payments";
+    return applySecurityHeaders(
+      NextResponse.rewrite(rewriteUrl),
+      "/api/remote-payments",
+    );
+  }
 
   let response = NextResponse.next();
 
