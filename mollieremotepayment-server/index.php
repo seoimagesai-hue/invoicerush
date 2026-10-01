@@ -3,7 +3,7 @@
 Plugin Name: WooCommerce Remote Payment - Mollie Server
 Description: Remote WooCommerce payment collection server using Mollie hosted checkout.
 Author: Adapted for Mollie
-Version: 2.2.0
+Version: 2.2.2
 Requires at least: 6.0
 Requires PHP: 7.4
 */
@@ -13,8 +13,8 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * Optional local credentials.php seeds Mollie API key, currency, and shared secret.
- * Does not change payment/webhook logic — only fills WP options used by this plugin.
+ * Optional local credentials.php seeds Mollie API key and shared secret only.
+ * Currency is not hardcoded — each client order supplies its own currency.
  */
 function wrp_mollie_load_credentials_file() {
     static $done = false;
@@ -34,9 +34,6 @@ function wrp_mollie_apply_credentials() {
     if (defined('WRP_MOLLIE_API_KEY') && is_string(WRP_MOLLIE_API_KEY) && WRP_MOLLIE_API_KEY !== '') {
         update_option('wrp_mollie_api_key', sanitize_text_field(WRP_MOLLIE_API_KEY));
     }
-    if (defined('WRP_MOLLIE_CURRENCY') && is_string(WRP_MOLLIE_CURRENCY) && WRP_MOLLIE_CURRENCY !== '') {
-        update_option('wrp_mollie_currency', wrp_mollie_sanitize_currency(WRP_MOLLIE_CURRENCY));
-    }
     if (defined('WRP_MOLLIE_SHARED_SECRET') && is_string(WRP_MOLLIE_SHARED_SECRET) && WRP_MOLLIE_SHARED_SECRET !== '') {
         update_option('wrp_mollie_shared_secret', sanitize_text_field(WRP_MOLLIE_SHARED_SECRET));
     }
@@ -44,6 +41,22 @@ function wrp_mollie_apply_credentials() {
 
 register_activation_hook(__FILE__, 'wrp_mollie_apply_credentials');
 add_action('admin_init', 'wrp_mollie_apply_credentials');
+
+add_action('admin_init', 'wrp_mollie_server_migrate_222', 1);
+function wrp_mollie_server_migrate_222() {
+    $version = (string) get_option('wrp_mollie_server_version', '');
+    if ($version === '2.2.2') {
+        return;
+    }
+
+    // Migrate the previous plugin default to an order-number-only Mollie description.
+    $format = (string) get_option('wrp_mollie_description_format', '');
+    if ($format === '' || $format === '{description} - Order #{order_number}') {
+        update_option('wrp_mollie_description_format', 'Order #{order_number}');
+    }
+
+    update_option('wrp_mollie_server_version', '2.2.2');
+}
 
 add_action('admin_menu', 'wrp_mollie_server_menu');
 function wrp_mollie_server_menu() {
@@ -62,22 +75,68 @@ function wrp_mollie_server_register_settings() {
     register_setting('wrp_mollie_server', 'wrp_mollie_api_key', array('sanitize_callback' => 'sanitize_text_field'));
     register_setting('wrp_mollie_server', 'wrp_mollie_currency', array('sanitize_callback' => 'wrp_mollie_sanitize_currency'));
     register_setting('wrp_mollie_server', 'wrp_mollie_shared_secret', array('sanitize_callback' => 'sanitize_text_field'));
+    register_setting('wrp_mollie_server', 'wrp_mollie_default_description', array('sanitize_callback' => 'wrp_mollie_sanitize_description'));
+    register_setting('wrp_mollie_server', 'wrp_mollie_description_format', array('sanitize_callback' => 'wrp_mollie_sanitize_description_format'));
 }
 
 function wrp_mollie_sanitize_currency($value) {
     $value = strtoupper(preg_replace('/[^A-Za-z]/', '', (string) $value));
-    return strlen($value) === 3 ? $value : 'USD';
+    return strlen($value) === 3 ? $value : '';
+}
+
+function wrp_mollie_normalize_request_currency($value) {
+    $currency = wrp_mollie_sanitize_currency($value);
+    return $currency !== '' ? $currency : false;
+}
+
+function wrp_mollie_sanitize_description($value) {
+    $value = trim(sanitize_text_field((string) $value));
+    return substr($value, 0, 120);
+}
+
+function wrp_mollie_sanitize_description_format($value) {
+    $value = trim(sanitize_text_field((string) $value));
+    if ($value === '') {
+        return 'Order #{order_number}';
+    }
+
+    // Keep only supported placeholders; unknown placeholders are stripped.
+    $value = preg_replace('/\{(?!description\}|order_number\})[^}]+\}/', '', $value);
+    return substr($value, 0, 180);
+}
+
+function wrp_mollie_default_description() {
+    $value = wrp_mollie_sanitize_description(get_option('wrp_mollie_default_description', 'Online Order'));
+    return $value !== '' ? $value : 'Online Order';
+}
+
+function wrp_mollie_build_description($description, $order_number) {
+    $description = wrp_mollie_sanitize_description($description);
+    if ($description === '') {
+        $description = wrp_mollie_default_description();
+    }
+
+    $format = wrp_mollie_sanitize_description_format(get_option('wrp_mollie_description_format', 'Order #{order_number}'));
+    $built = strtr($format, array(
+        '{description}' => $description,
+        '{order_number}' => sanitize_text_field((string) $order_number),
+    ));
+    $built = trim($built);
+
+    return substr($built !== '' ? $built : $description, 0, 255);
 }
 
 function wrp_mollie_server_settings_page() {
     if (!current_user_can('manage_options')) {
         return;
     }
-    $currency = get_option('wrp_mollie_currency', 'USD');
+    $currency = wrp_mollie_sanitize_currency(get_option('wrp_mollie_currency', ''));
+    $default_description = wrp_mollie_default_description();
+    $description_format = get_option('wrp_mollie_description_format', 'Order #{order_number}');
     ?>
     <div class="wrap">
         <h1>WooCommerce Remote Payment - Mollie Server</h1>
-        <p>Enter your Mollie API key and use the same Shared Secret in the client plugin.</p>
+        <p>Enter your Mollie API key and use the same Shared Secret in the client plugin. Currency is taken from each client order (not hardcoded).</p>
         <form method="post" action="options.php">
             <?php settings_fields('wrp_mollie_server'); ?>
             <table class="form-table" role="presentation">
@@ -89,10 +148,10 @@ function wrp_mollie_server_settings_page() {
                     </td>
                 </tr>
                 <tr>
-                    <th scope="row"><label for="wrp_mollie_currency">Currency</label></th>
+                    <th scope="row"><label for="wrp_mollie_currency">Optional Currency Filter</label></th>
                     <td>
-                        <input id="wrp_mollie_currency" type="text" maxlength="3" name="wrp_mollie_currency" value="<?php echo esc_attr($currency); ?>" class="small-text" />
-                        <p class="description">Default: USD. This must match the WooCommerce order currency.</p>
+                        <input id="wrp_mollie_currency" type="text" maxlength="3" name="wrp_mollie_currency" value="<?php echo esc_attr($currency); ?>" class="small-text" placeholder="any" />
+                        <p class="description">Leave empty to accept each order’s currency from the client. If set (e.g. <code>GBP</code>), only that currency is accepted.</p>
                     </td>
                 </tr>
                 <tr>
@@ -100,6 +159,20 @@ function wrp_mollie_server_settings_page() {
                     <td>
                         <input id="wrp_mollie_shared_secret" type="password" name="wrp_mollie_shared_secret" value="<?php echo esc_attr(get_option('wrp_mollie_shared_secret')); ?>" class="regular-text" autocomplete="off" />
                         <p class="description">Use a long random value (32+ characters). Enter the exact same value in the client plugin.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="wrp_mollie_default_description">Default Payment Description</label></th>
+                    <td>
+                        <input id="wrp_mollie_default_description" type="text" maxlength="120" name="wrp_mollie_default_description" value="<?php echo esc_attr($default_description); ?>" class="regular-text" />
+                        <p class="description">Used only when the client does not send a payment/product description. Example: <code>Online Order</code>.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="wrp_mollie_description_format">Mollie Description Format</label></th>
+                    <td>
+                        <input id="wrp_mollie_description_format" type="text" maxlength="180" name="wrp_mollie_description_format" value="<?php echo esc_attr($description_format); ?>" class="regular-text" />
+                        <p class="description">Default: <code>Order #{order_number}</code>. Available placeholders: <code>{description}</code> and <code>{order_number}</code>. Keep the default if you want Mollie to show only the order ID.</p>
                     </td>
                 </tr>
                 <tr>
@@ -361,7 +434,7 @@ function wrp_mollie_create_payment_for_remote_order($remote_order_id, $card_toke
     $merchant_order_number = wrp_mollie_normalize_merchant_order_number(get_post_meta($remote_order_id, '_wrp_merchant_order_number', true));
 
     if ($product_name === '') {
-        $product_name = 'Dmrush';
+        $product_name = wrp_mollie_default_description();
     }
     if ($merchant_order_number === false) {
         $merchant_order_number = '';
@@ -381,7 +454,7 @@ function wrp_mollie_create_payment_for_remote_order($remote_order_id, $card_toke
             'currency' => $currency,
             'value' => $amount,
         ),
-        'description' => $product_name . ' - Order #' . $display_order_number,
+        'description' => wrp_mollie_build_description($product_name, $display_order_number),
         'redirectUrl' => add_query_arg(array('ros' => $remote_order_id, 'rt' => $token), home_url('/')),
         'cancelUrl' => add_query_arg(array('rof' => $remote_order_id, 'rt' => $token), home_url('/')),
         'webhookUrl' => home_url('/?mrp=1'),
@@ -442,9 +515,10 @@ function wrp_mollie_process_remote_order() {
             wp_send_json(array('ok' => false, 'message' => 'Could not load the Mollie profile for this API key.'), 503);
         }
 
+        $server_currency = wrp_mollie_sanitize_currency(get_option('wrp_mollie_currency', ''));
         wp_send_json(array(
             'ok' => true,
-            'currency' => strtoupper((string) get_option('wrp_mollie_currency', 'USD')),
+            'currency' => $server_currency !== '' ? $server_currency : 'any',
             'profile_id' => sanitize_text_field((string) $profile['id']),
             'testmode' => strpos($api_key, 'test_') === 0,
             'hosted_checkout' => true,
@@ -482,10 +556,10 @@ function wrp_mollie_process_remote_order() {
         $return_url = wrp_mollie_valid_remote_url($data['return_url']);
         $cancel_url = wrp_mollie_valid_remote_url($data['cancel_url']);
         $amount = number_format((float) $data['amount'], 2, '.', '');
-        $currency = strtoupper(sanitize_text_field($data['currency']));
+        $currency = wrp_mollie_normalize_request_currency($data['currency']);
         $product_name = sanitize_text_field($data['product_name']);
         if ($product_name === '') {
-            $product_name = 'Dmrush';
+            $product_name = wrp_mollie_default_description();
         }
         $product_name = substr($product_name, 0, 64);
         $merchant_order_number = wrp_mollie_normalize_merchant_order_number($data['merchant_order_number']);
@@ -495,12 +569,19 @@ function wrp_mollie_process_remote_order() {
             exit;
         }
         $integration_mode = sanitize_key((string) $data['integration_mode']);
-        $server_currency = strtoupper((string) get_option('wrp_mollie_currency', 'USD'));
+        $server_currency = wrp_mollie_sanitize_currency(get_option('wrp_mollie_currency', ''));
         $items = json_decode((string) $data['items_json'], true);
 
-        if (!$callback_url || !$return_url || !$cancel_url || (float) $amount <= 0 || $currency !== $server_currency || !is_array($items)) {
+        if (!$callback_url || !$return_url || !$cancel_url || (float) $amount <= 0 || $currency === false || !is_array($items)) {
             status_header(400);
             echo 'Invalid remote payment data.';
+            exit;
+        }
+
+        // Optional filter only: if an admin currency is set, enforce it. Otherwise accept the client's currency.
+        if ($server_currency !== '' && $currency !== $server_currency) {
+            status_header(400);
+            echo 'Invalid remote payment currency.';
             exit;
         }
 
