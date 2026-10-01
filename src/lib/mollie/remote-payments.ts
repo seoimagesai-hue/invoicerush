@@ -7,6 +7,10 @@ import {
 import { and, eq, gt, lt } from "drizzle-orm";
 import { db } from "@/db";
 import { remoteOrders, remotePaymentNonces } from "@/db/schema";
+import {
+  resolveRemotePaymentCurrency,
+  serverCurrencyHealthLabel,
+} from "@/lib/mollie/remote-currency";
 
 export class RemotePaymentError extends Error {
   status: number;
@@ -60,12 +64,8 @@ function getSharedSecret(): string {
   return process.env.MOLLIE_REMOTE_SHARED_SECRET?.trim() ?? "";
 }
 
-function getOptionalCurrencyFilter(): string {
-  const value = (process.env.MOLLIE_REMOTE_CURRENCY ?? "")
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z]/g, "");
-  return value.length === 3 ? value : "";
+function getConfiguredServerCurrency(): string {
+  return process.env.MOLLIE_REMOTE_CURRENCY?.trim() ?? "";
 }
 
 function getDescriptionFormat(): string {
@@ -85,15 +85,6 @@ function safeEqual(a: string, b: string): boolean {
     return false;
   }
   return timingSafeEqual(left, right);
-}
-
-function sanitizeCurrency(value: string): string {
-  return value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 3);
-}
-
-function normalizeRequestCurrency(value: string): string | null {
-  const currency = sanitizeCurrency(value);
-  return currency.length === 3 ? currency : null;
 }
 
 function normalizeMerchantOrderNumber(value: string): string | false {
@@ -524,10 +515,10 @@ export async function handleRemoteHealth(
       );
     }
 
-    const filter = getOptionalCurrencyFilter();
+    const filterLabel = serverCurrencyHealthLabel(getConfiguredServerCurrency());
     return Response.json({
       ok: true,
-      currency: filter || "any",
+      currency: filterLabel,
       profile_id: profile.id,
       testmode: apiKey.startsWith("test_"),
       hosted_checkout: true,
@@ -575,7 +566,6 @@ export async function handleRemoteCreate(
   const returnUrl = isValidHttpUrl(data.return_url);
   const cancelUrl = isValidHttpUrl(data.cancel_url);
   const amount = formatAmount(data.amount);
-  const currency = normalizeRequestCurrency(data.currency);
   let productName = data.product_name.trim().slice(0, 64);
   if (!productName) productName = getDefaultDescription().slice(0, 64);
 
@@ -587,7 +577,10 @@ export async function handleRemoteCreate(
   }
 
   const integrationMode = sanitizeKey(data.integration_mode);
-  const serverCurrency = getOptionalCurrencyFilter();
+  const currencyResolution = resolveRemotePaymentCurrency(
+    getConfiguredServerCurrency(),
+    data.currency,
+  );
   let items: unknown;
   try {
     items = JSON.parse(data.items_json);
@@ -600,15 +593,20 @@ export async function handleRemoteCreate(
     !returnUrl ||
     !cancelUrl ||
     Number(amount) <= 0 ||
-    !currency ||
     !Array.isArray(items)
   ) {
     throw new RemotePaymentError("Invalid remote payment data.", 400);
   }
 
-  if (serverCurrency && currency !== serverCurrency) {
-    throw new RemotePaymentError("Invalid remote payment currency.", 400);
+  if (!currencyResolution.ok) {
+    if (currencyResolution.reason === "currency_mismatch") {
+      throw new RemotePaymentError("Invalid remote payment currency.", 400);
+    }
+    throw new RemotePaymentError("Invalid remote payment data.", 400);
   }
+
+  // Always the validated client currency — never the literal "ANY".
+  const currency = currencyResolution.clientCurrency;
 
   const orderId = Number.parseInt(data.order_id, 10);
   if (!Number.isFinite(orderId) || orderId <= 0) {
